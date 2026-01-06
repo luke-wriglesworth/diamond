@@ -1,0 +1,7 @@
+train:
+  id: fpv
+  size: [150, 280]  # Full resolution for upsampler (if used)
+num_actions: 4096   # 8^4 bins (8 bins per channel: roll, pitch, throttle, yaw)
+path_data_low_res: null  # TO DEFINE: path to converted dataset
+path_data_full_res: null  # Skip upsampler initially
+keymap: null  # No keyboard mapping for FPV
