@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import ale_py
 import gymnasium
-from gymnasium.vector import AsyncVectorEnv
+from gymnasium.vector import AsyncVectorEnv, VectorWrapper
 import numpy as np
 import torch
 from torch import Tensor
@@ -50,7 +50,7 @@ def make_atari_env(
     return env
 
 
-class DoneOnLifeLoss(gymnasium.Wrapper):
+class DoneOnLifeLoss(VectorWrapper):
     def __init__(self, env: AsyncVectorEnv) -> None:
         super().__init__(env)
 
@@ -63,14 +63,18 @@ class DoneOnLifeLoss(gymnasium.Wrapper):
         return obs, rew, end, trunc, info
 
 
-class TorchEnv(gymnasium.Wrapper):
+class TorchEnv(VectorWrapper):
     def __init__(self, env: gymnasium.Env, device: torch.device) -> None:
         super().__init__(env)
         self.device = device
-        self.num_envs = env.observation_space.shape[0]
+        self._num_envs = env.observation_space.shape[0]
         self.num_actions = env.unwrapped.single_action_space.n
         b, h, w, c = env.observation_space.shape
         self.observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(b, c, h, w))
+
+    @property
+    def num_envs(self) -> int:
+        return self._num_envs
 
     def reset(self, *args, **kwargs) -> Tuple[Tensor, Dict[str, Any]]:
         obs, info = self.env.reset(*args, **kwargs)
@@ -80,7 +84,12 @@ class TorchEnv(gymnasium.Wrapper):
         obs, rew, end, trunc, info = self.env.step(actions.cpu().numpy())
         dead = np.logical_or(end, trunc)
         if dead.any():
-            info["final_observation"] = self._to_tensor(np.stack(info["final_observation"][dead]))
+            if "final_observation" in info:
+                final_obs = np.stack(info["final_observation"][dead])
+            else:
+                # Fallback: use current obs for envs that ended
+                final_obs = obs[dead]
+            info["final_observation"] = self._to_tensor(final_obs)
         obs, rew, end, trunc = (self._to_tensor(x) for x in (obs, rew, end, trunc))
         return obs, rew, end, trunc, info
 
