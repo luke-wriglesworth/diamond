@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import ale_py
 import gymnasium
-from gymnasium.vector import AsyncVectorEnv
+from gymnasium.vector import AsyncVectorEnv, AutoresetMode, VectorWrapper
 import numpy as np
 import torch
 from torch import Tensor
@@ -35,7 +35,7 @@ def make_atari_env(
         )
         return env
 
-    env = AsyncVectorEnv([env_fn for _ in range(num_envs)])
+    env = AsyncVectorEnv([env_fn for _ in range(num_envs)], autoreset_mode=AutoresetMode.SAME_STEP)
 
     # The AsyncVectorEnv resets the env on termination, which means that it will
     # reset the environment if we use the default AtariPreprocessing of gymnasium with
@@ -50,7 +50,7 @@ def make_atari_env(
     return env
 
 
-class DoneOnLifeLoss(gymnasium.Wrapper):
+class DoneOnLifeLoss(VectorWrapper):
     def __init__(self, env: AsyncVectorEnv) -> None:
         super().__init__(env)
 
@@ -63,14 +63,18 @@ class DoneOnLifeLoss(gymnasium.Wrapper):
         return obs, rew, end, trunc, info
 
 
-class TorchEnv(gymnasium.Wrapper):
+class TorchEnv(VectorWrapper):
     def __init__(self, env: gymnasium.Env, device: torch.device) -> None:
         super().__init__(env)
         self.device = device
-        self.num_envs = env.observation_space.shape[0]
+        self._num_envs = env.observation_space.shape[0]
         self.num_actions = env.unwrapped.single_action_space.n
         b, h, w, c = env.observation_space.shape
         self.observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(b, c, h, w))
+
+    @property
+    def num_envs(self) -> int:
+        return self._num_envs
 
     def reset(self, *args, **kwargs) -> Tuple[Tensor, Dict[str, Any]]:
         obs, info = self.env.reset(*args, **kwargs)
