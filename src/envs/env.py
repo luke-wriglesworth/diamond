@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import ale_py
 import gymnasium
-from gymnasium.vector import AsyncVectorEnv, VectorWrapper
+from gymnasium.vector import AsyncVectorEnv, AutoresetMode, VectorWrapper
 import numpy as np
 import torch
 from torch import Tensor
@@ -35,7 +35,7 @@ def make_atari_env(
         )
         return env
 
-    env = AsyncVectorEnv([env_fn for _ in range(num_envs)])
+    env = AsyncVectorEnv([env_fn for _ in range(num_envs)], autoreset_mode=AutoresetMode.SAME_STEP)
 
     # The AsyncVectorEnv resets the env on termination, which means that it will
     # reset the environment if we use the default AtariPreprocessing of gymnasium with
@@ -84,12 +84,7 @@ class TorchEnv(VectorWrapper):
         obs, rew, end, trunc, info = self.env.step(actions.cpu().numpy())
         dead = np.logical_or(end, trunc)
         if dead.any():
-            if "final_observation" in info:
-                final_obs = np.stack(info["final_observation"][dead])
-            else:
-                # Fallback: use current obs for envs that ended
-                final_obs = obs[dead]
-            info["final_observation"] = self._to_tensor(final_obs)
+            info["final_observation"] = self._to_tensor(np.stack(info["final_observation"][dead]))
         obs, rew, end, trunc = (self._to_tensor(x) for x in (obs, rew, end, trunc))
         return obs, rew, end, trunc, info
 
