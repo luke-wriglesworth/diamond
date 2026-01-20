@@ -1,0 +1,34 @@
+{
+  "0": {
+    "value": 1022,
+    "min": 0,
+    "max": 2048,
+    "fuzz": 8,
+    "flat": 128,
+    "resolution": 0
+  },
+  "1": {
+    "value": 1025,
+    "min": 0,
+    "max": 2048,
+    "fuzz": 8,
+    "flat": 128,
+    "resolution": 0
+  },
+  "2": {
+    "value": 0,
+    "min": 0,
+    "max": 2048,
+    "fuzz": 8,
+    "flat": 128,
+    "resolution": 0
+  },
+  "3": {
+    "value": 1024,
+    "min": 0,
+    "max": 2048,
+    "fuzz": 8,
+    "flat": 128,
+    "resolution": 0
+  }
+}
