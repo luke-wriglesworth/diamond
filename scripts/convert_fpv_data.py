@@ -51,13 +51,14 @@ from data.episode import Episode
 
 # Configuration
 TARGET_FPS = 15
-LOW_RES_SIZE = (30, 56)  # H, W - matches CSGO
+LOW_RES_SIZE = (30, 56)  # H, W - matches CSGO training resolution
 FULL_RES_SIZE = (150, 280)  # H, W - for optional upsampler
+# Expected input: 2560x1440 @ 30fps from OBS (will be downscaled by ffmpeg)
 
 # Action discretization
 NUM_BINS = 8  # Per channel: 8^4 = 4096 total actions
-PWM_MIN = 1000
-PWM_MAX = 2000
+PWM_MIN = 0
+PWM_MAX = 2048  # RadioMaster evdev range (matches caps.json)
 
 
 def discretize_pwm(value: float, min_pwm: float = PWM_MIN, max_pwm: float = PWM_MAX, num_bins: int = NUM_BINS) -> int:
@@ -111,8 +112,14 @@ def extract_frames(video_path: Path, output_dir: Path, fps: int = TARGET_FPS, si
     return num_frames
 
 
-def load_frames(frame_dir: Path, num_frames: int) -> torch.FloatTensor:
-    """Load frames and convert to tensor with shape [T, C, H, W] in range [-1, 1]."""
+def load_frames(frame_dir: Path, num_frames: int, as_uint8: bool = False) -> torch.Tensor:
+    """Load frames and convert to tensor with shape [T, C, H, W].
+
+    Args:
+        frame_dir: Directory containing frame_XXXXX.png files
+        num_frames: Number of frames to load
+        as_uint8: If True, return uint8 tensor [0, 255]. If False, return float32 [-1, 1].
+    """
     frames = []
     for i in range(1, num_frames + 1):
         frame_path = frame_dir / f"frame_{i:05d}.png"
@@ -120,13 +127,17 @@ def load_frames(frame_dir: Path, num_frames: int) -> torch.FloatTensor:
             break
 
         img = Image.open(frame_path).convert("RGB")
-        # Convert to tensor: [H, W, C] -> [C, H, W], normalize to [-1, 1]
-        arr = np.array(img, dtype=np.float32)
-        arr = arr / 255.0 * 2.0 - 1.0  # [0, 255] -> [-1, 1]
+        arr = np.array(img, dtype=np.uint8)
         tensor = torch.from_numpy(arr).permute(2, 0, 1)  # [H, W, C] -> [C, H, W]
         frames.append(tensor)
 
-    return torch.stack(frames)
+    stacked = torch.stack(frames)
+
+    if as_uint8:
+        return stacked  # uint8 [0, 255]
+    else:
+        # Convert to float32 [-1, 1]
+        return stacked.float().div(255).mul(2).sub(1)
 
 
 def sync_actions_to_frames(csv_path: Path, num_frames: int, fps: int = TARGET_FPS) -> torch.LongTensor:
@@ -163,9 +174,14 @@ def sync_actions_to_frames(csv_path: Path, num_frames: int, fps: int = TARGET_FP
     return torch.tensor(actions, dtype=torch.long)
 
 
-def create_episode(obs: torch.FloatTensor, act: torch.LongTensor) -> Episode:
+def create_episode(obs: torch.FloatTensor, act: torch.LongTensor, episode_id: int = None) -> Episode:
     """Create an Episode object from observations and actions."""
     T = obs.size(0)
+
+    # Store episode_id for linking to full_res dataset (like CSGO's original_file_id)
+    info = {}
+    if episode_id is not None:
+        info["original_file_id"] = episode_id
 
     return Episode(
         obs=obs,
@@ -173,7 +189,7 @@ def create_episode(obs: torch.FloatTensor, act: torch.LongTensor) -> Episode:
         rew=torch.zeros(T, dtype=torch.float32),
         end=torch.zeros(T, dtype=torch.uint8),
         trunc=torch.zeros(T, dtype=torch.uint8),
-        info={}
+        info=info
     )
 
 
@@ -213,25 +229,28 @@ def main():
                         help="Fraction of episodes for test set (default: 0.1)")
     parser.add_argument("--low_res", type=str, default="30x56",
                         help="Low resolution for training as HxW (default: 30x56)")
+    parser.add_argument("--full_res", type=str, default="150x280",
+                        help="Full resolution for upsampler as HxW (default: 150x280)")
     args = parser.parse_args()
 
-    # Parse resolution
+    # Parse resolutions
     h, w = map(int, args.low_res.split("x"))
     low_res_size = (h, w)
+    h, w = map(int, args.full_res.split("x"))
+    full_res_size = (h, w)
 
-    # Update global config
-    global NUM_BINS, TARGET_FPS, LOW_RES_SIZE
-    NUM_BINS = args.num_bins
-    TARGET_FPS = args.fps
-    LOW_RES_SIZE = low_res_size
+    # Config values from args (used directly, not via globals)
+    num_bins = args.num_bins
+    target_fps = args.fps
 
     print(f"Configuration:")
     print(f"  Input directory: {args.input_dir}")
     print(f"  Output directory: {args.output_dir}")
     print(f"  Target FPS: {args.fps}")
-    print(f"  Resolution: {low_res_size[0]}x{low_res_size[1]}")
-    print(f"  Action bins per channel: {args.num_bins}")
-    print(f"  Total action space: {args.num_bins ** 4}")
+    print(f"  Low resolution: {low_res_size[0]}x{low_res_size[1]}")
+    print(f"  Full resolution: {full_res_size[0]}x{full_res_size[1]}")
+    print(f"  Action bins per channel: {num_bins}")
+    print(f"  Total action space: {num_bins ** 4}")
     print()
 
     # Find recording pairs
@@ -248,35 +267,67 @@ def main():
     num_test = max(1, int(len(pairs) * args.test_split))
     test_indices = set(indices[:num_test])
 
-    # Create datasets
-    train_dir = args.output_dir / "train"
-    test_dir = args.output_dir / "test"
+    # Create directories (CSGO-style: separate low_res and full_res)
+    low_res_dir = args.output_dir / "low_res"
+    full_res_dir = args.output_dir / "full_res"
+    train_dir = low_res_dir / "train"
+    test_dir = low_res_dir / "test"
 
     train_dataset = Dataset(train_dir, dataset_full_res=None)
     test_dataset = Dataset(test_dir, dataset_full_res=None)
 
+    # Track full-res episode lengths for metadata
+    full_res_episode_lengths = {}
+
+    def get_full_res_path(episode_id: int) -> Path:
+        """Get path for full-res episode file (same hierarchy as Dataset)."""
+        n = 3
+        powers = np.arange(n)
+        subfolders = np.floor((episode_id % 10 ** (1 + powers)) / 10**powers) * 10**powers
+        subfolders = [int(x) for x in subfolders[::-1]]
+        subfolders = "/".join([f"{x:0{n - i}d}" for i, x in enumerate(subfolders)])
+        return full_res_dir / subfolders / f"{episode_id}.pt"
+
     # Process each recording
+    episode_id = 0
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
 
         for i, (video_path, csv_path) in enumerate(tqdm(pairs, desc="Converting recordings")):
             try:
-                # Extract frames
-                frame_dir = tmp_path / f"frames_{i}"
-                num_frames = extract_frames(video_path, frame_dir, fps=args.fps, size=low_res_size)
+                # Extract low-res frames
+                frame_dir_low = tmp_path / f"frames_low_{i}"
+                num_frames = extract_frames(video_path, frame_dir_low, fps=args.fps, size=low_res_size)
 
                 if num_frames < 10:
                     print(f"Warning: {video_path.name} has only {num_frames} frames, skipping")
                     continue
 
-                # Load frames
-                obs = load_frames(frame_dir, num_frames)
+                # Load low-res frames (as float32 for training)
+                obs = load_frames(frame_dir_low, num_frames, as_uint8=False)
+
+                # Extract full-res frames and save separately as uint8
+                frame_dir_full = tmp_path / f"frames_full_{i}"
+                extract_frames(video_path, frame_dir_full, fps=args.fps, size=full_res_size)
+                full_res_obs = load_frames(frame_dir_full, num_frames, as_uint8=True)
+
+                # Save full-res to separate file
+                full_res_path = get_full_res_path(episode_id)
+                full_res_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(full_res_obs, full_res_path)
+                full_res_episode_lengths[episode_id] = num_frames
+
+                # Clean up full-res frames
+                for f in frame_dir_full.glob("*.png"):
+                    f.unlink()
+                frame_dir_full.rmdir()
 
                 # Sync actions
                 act = sync_actions_to_frames(csv_path, num_frames, fps=args.fps)
 
-                # Create episode
-                episode = create_episode(obs, act)
+                # Create episode with reference to full_res via episode_id
+                episode = create_episode(obs, act, episode_id)
 
                 # Add to appropriate dataset
                 if i in test_indices:
@@ -284,14 +335,22 @@ def main():
                 else:
                     train_dataset.add_episode(episode)
 
-                # Clean up frames
-                for f in frame_dir.glob("*.png"):
+                episode_id += 1
+
+                # Clean up low-res frames
+                for f in frame_dir_low.glob("*.png"):
                     f.unlink()
-                frame_dir.rmdir()
+                frame_dir_low.rmdir()
 
             except Exception as e:
                 print(f"Error processing {video_path.name}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
+
+    # Save full-res metadata
+    full_res_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({"episode_lengths": full_res_episode_lengths}, full_res_dir / "info.pt")
 
     # Save dataset metadata
     train_dataset.save_to_default_path()
@@ -301,10 +360,12 @@ def main():
     print(f"Conversion complete!")
     print(f"  Train: {train_dataset.num_episodes} episodes, {train_dataset.num_steps} frames")
     print(f"  Test: {test_dataset.num_episodes} episodes, {test_dataset.num_steps} frames")
+    print(f"  Full resolution data: {full_res_dir}")
     print()
     print(f"Update config/env/fpv.yaml with:")
-    print(f"  path_data_low_res: {args.output_dir}")
-    print(f"  num_actions: {args.num_bins ** 4}")
+    print(f"  path_data_low_res: {low_res_dir}")
+    print(f"  path_data_full_res: {full_res_dir}")
+    print(f"  num_actions: {num_bins ** 4}")
 
 
 if __name__ == "__main__":

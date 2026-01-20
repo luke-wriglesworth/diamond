@@ -54,6 +54,11 @@ class Trainer(StateDictMixin):
         self._use_cuda = self._device.type == "cuda"
         if self._use_cuda:
             torch.cuda.set_device(self._rank)  # fix compilation error on multi-gpu nodes
+            #torch.cuda.set_per_process_memory_fraction(0.95, self._rank)  # limit VRAM prevent freezes
+
+        # Mixed precision training
+        self._use_amp = cfg.training.use_amp and self._use_cuda
+        self._scaler = torch.amp.GradScaler("cuda", enabled=self._use_amp)
 
         # Init wandb
         if self._rank == 0:
@@ -93,7 +98,17 @@ class Trainer(StateDictMixin):
             assert self._is_static_dataset
             num_actions = cfg.env.num_actions
             dataset_full_res = CSGOHdf5Dataset(Path(cfg.env.path_data_full_res))
-        
+
+        elif cfg.env.train.id == "fpv":
+            assert cfg.env.path_data_low_res is not None, "Make sure to set path_data_low_res in cfg.env"
+            assert self._is_static_dataset
+            num_actions = cfg.env.num_actions
+            if cfg.env.path_data_full_res is not None:
+                from data import FPVFullResDataset
+                dataset_full_res = FPVFullResDataset(Path(cfg.env.path_data_full_res))
+            else:
+                dataset_full_res = None
+
         # Envs (atari only)
         else:
             if self._rank == 0:
@@ -154,7 +169,6 @@ class Trainer(StateDictMixin):
             num_workers=num_workers,
             persistent_workers=(num_workers > 0),
             pin_memory=self._use_cuda,
-            pin_memory_device=str(self._device) if self._use_cuda else "",
         )
 
         make_batch_sampler = partial(BatchSampler, self.train_dataset, self._rank, self._world_size)
@@ -397,19 +411,22 @@ class Trainer(StateDictMixin):
 
         for i in trange(num_steps, desc=f"Training {name}", disable=self._rank > 0):
             batch = next(data_iterator).to(self._device) if data_iterator is not None else None
-            loss, metrics = model(batch) if batch is not None else model()
-            loss.backward()
+            with torch.autocast("cuda", enabled=self._use_amp):
+                loss, metrics = model(batch) if batch is not None else model()
+            self._scaler.scale(loss).backward()
 
             num_batch = self.num_batch_train.get(name)
             metrics[f"num_batch_train_{name}"] = num_batch
             self.num_batch_train.set(name, num_batch + 1)
 
             if (i + 1) % cfg.grad_acc_steps == 0:
+                self._scaler.unscale_(opt)
                 if cfg.max_grad_norm is not None:
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm).item()
                     metrics["grad_norm_before_clip"] = grad_norm
 
-                opt.step()
+                self._scaler.step(opt)
+                self._scaler.update()
                 opt.zero_grad()
 
                 if lr_sched is not None:

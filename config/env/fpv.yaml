@@ -2,6 +2,19 @@ train:
   id: fpv
   size: [150, 280]  # Full resolution for upsampler (if used)
 num_actions: 4096   # 8^4 bins (8 bins per channel: roll, pitch, throttle, yaw)
-path_data_low_res: null  # TO DEFINE: path to converted dataset
-path_data_full_res: null  # Skip upsampler initially
+path_data_low_res: /home/luke/Code/diamond/data/fpv/low_res
+path_data_full_res: /home/luke/Code/diamond/data/fpv/full_res
 keymap: null  # No keyboard mapping for FPV
+
+training:
+  num_workers_data_loaders: 4
+
+denoiser:
+  training:
+    batch_size: 4
+    grad_acc_steps: 8
+
+upsampler:
+  training:
+    batch_size: 8
+    grad_acc_steps: 4

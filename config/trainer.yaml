@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - env: csgo
+  - env: fpv
   - agent: csgo
   - world_model_env: fast
 
@@ -9,10 +9,10 @@ hydra:
     chdir: True
 
 wandb:
-  mode: disabled
-  project: null
-  entity: null
-  name: null
+  mode: online
+  project: navitar
+  entity: synetic-labs
+  name: navitar-run
   group: null
   tags: null
   notes: null
@@ -54,11 +54,12 @@ static_dataset:
 
 training:
   should: True
-  num_final_epochs: 600
-  cache_in_ram: False
-  num_workers_data_loaders: 4
+  num_final_epochs: 60
+  cache_in_ram: True
+  num_workers_data_loaders: 0
   model_free: False # if True, turn off world_model training and RL in imagination
   compile_wm: False
+  use_amp: false # mixed precision training (float16)
 
 evaluation:
   should: True
@@ -68,8 +69,8 @@ denoiser:
   training:
     num_autoregressive_steps: 4
     start_after_epochs: 0
-    steps_first_epoch: 400
-    steps_per_epoch: 400
+    steps_first_epoch: 20 # 20
+    steps_per_epoch: 20 # 20
     sample_weights: null
     batch_size: 16
     grad_acc_steps: 8
@@ -92,8 +93,8 @@ upsampler:
   training:
     num_autoregressive_steps: 1
     start_after_epochs: 0
-    steps_first_epoch: 400
-    steps_per_epoch: 400
+    steps_first_epoch: 20 # 400
+    steps_per_epoch: 20 # 400
     sample_weights: null
     batch_size: 4
     grad_acc_steps: 8

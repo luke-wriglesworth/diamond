@@ -155,6 +155,71 @@ class Dataset(StateDictMixin, TorchDataset):
             self.load_state_dict(torch.load(self._default_path, weights_only=False))
 
 
+class FPVFullResDataset(StateDictMixin, TorchDataset):
+    """Dataset for loading full-resolution FPV frames on-demand from .pt files."""
+    def __init__(self, directory: Path) -> None:
+        super().__init__()
+        self._directory = Path(directory)
+        # Load metadata
+        info_path = self._directory / "info.pt"
+        if info_path.exists():
+            info = torch.load(info_path, weights_only=False)
+            self._episode_lengths = info["episode_lengths"]  # dict: episode_id -> length
+        else:
+            # Scan directory for episode files
+            self._episode_lengths = {}
+            for pt_file in sorted(self._directory.rglob("*.pt")):
+                if pt_file.name != "info.pt":
+                    ep_id = int(pt_file.stem)
+                    data = torch.load(pt_file, weights_only=False)
+                    self._episode_lengths[ep_id] = data.shape[0]
+
+        self.num_episodes = len(self._episode_lengths)
+        self.num_steps = sum(self._episode_lengths.values())
+        self.lengths = np.array([self._episode_lengths[i] for i in range(self.num_episodes)], dtype=np.int64)
+
+    def __len__(self) -> int:
+        return self.num_steps
+
+    def save_to_default_path(self) -> None:
+        pass
+
+    def _get_episode_path(self, episode_id: int) -> Path:
+        # Same hierarchy as Dataset class
+        n = 3
+        powers = np.arange(n)
+        subfolders = np.floor((episode_id % 10 ** (1 + powers)) / 10**powers) * 10**powers
+        subfolders = [int(x) for x in subfolders[::-1]]
+        subfolders = "/".join([f"{x:0{n - i}d}" for i, x in enumerate(subfolders)])
+        return self._directory / subfolders / f"{episode_id}.pt"
+
+    def __getitem__(self, segment_id: SegmentId) -> Segment:
+        episode_id = segment_id.episode_id
+        length = self._episode_lengths[episode_id]
+
+        start = max(0, segment_id.start)
+        stop = min(length, segment_id.stop)
+        pad_len_left = max(0, -segment_id.start)
+        pad_len_right = max(0, segment_id.stop - length)
+
+        # Load full-res frames (stored as uint8, convert to float [-1, 1])
+        pt_path = self._get_episode_path(episode_id)
+        full_res_uint8 = torch.load(pt_path, weights_only=False)[start:stop]
+        obs = full_res_uint8.float().div(255).mul(2).sub(1)
+
+        # Pad if needed
+        if pad_len_left > 0 or pad_len_right > 0:
+            obs = F.pad(obs, [0, 0, 0, 0, 0, 0, pad_len_left, pad_len_right])
+
+        mask_padding = torch.cat((torch.zeros(pad_len_left), torch.ones(stop - start), torch.zeros(pad_len_right))).bool()
+        act = torch.zeros(obs.size(0), dtype=torch.long)
+        rew = torch.zeros(obs.size(0))
+        end = torch.zeros(obs.size(0), dtype=torch.uint8)
+        trunc = torch.zeros(obs.size(0), dtype=torch.uint8)
+
+        return Segment(obs, act, rew, end, trunc, mask_padding, info={}, id=SegmentId(episode_id, start, stop))
+
+
 class CSGOHdf5Dataset(StateDictMixin, TorchDataset):
     def __init__(self, directory: Path) -> None:
         super().__init__()

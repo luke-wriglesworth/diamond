@@ -17,3 +17,6 @@ __pycache__/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+*.mkv
+*.pt
+*.npy
